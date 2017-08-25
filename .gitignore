@@ -1,0 +1,13 @@
+/bin/
+.classpath
+.project
+.settings/
+project/project/
+target/
+download/
+.DS_Store
+._.DS_Store
+.externalToolBuilders/
+project/._.DS_Store
+src/._.DS_Store
+
