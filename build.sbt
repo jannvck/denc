@@ -1,6 +1,6 @@
 import com.github.retronym.SbtOneJar._
 
-version := "0.1"
+version := "0.2"
 
 scalaVersion := "2.12.2"
 

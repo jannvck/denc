@@ -37,14 +37,17 @@ import scalafx.scene.text.Text
 import java.util.zip.CheckedInputStream
 import java.util.zip.CRC32
 import java.util.zip.CheckedOutputStream
+import scalafx.scene.control.Alert
+import scalafx.scene.control.Alert.AlertType
+import scalafx.application.Platform
 
 object DEnc extends JFXApp {
   private case class DerivedData(key: Array[Byte], salt: Array[Byte])
   private case class Metadata private (
-      filename: String,
+      filename: String, // FIXME maybe this is a security issue
       iv: Array[Byte],
       salt: Array[Byte],
-      encryptedSize: Long,
+      encryptedSize: Long, // FIXME storing encrypted size and metadata size is unnecessary redundancy
       checksum: Long,
       metadataSize: Int,
       metadataVersion: Int,
@@ -85,7 +88,7 @@ object DEnc extends JFXApp {
       fileChannel.position(metadataPosition)
       val dataMetadataVersion = ByteBuffer.allocate(4)
       fileChannel.read(dataMetadataVersion)
-      if (dataMetadataVersion.getInt(0) != VERSION) throw new RuntimeException("invalid metadata version detected")
+      if (dataMetadataVersion.getInt(0) != VERSION) throw new RuntimeException("Invalid metadata version detected")
       val dataFileNameLength = ByteBuffer.allocate(4)
       fileChannel.read(dataFileNameLength)
       val dataFileName = ByteBuffer.allocate(dataFileNameLength.getInt(0))
@@ -110,7 +113,7 @@ object DEnc extends JFXApp {
       fileChannel.read(dataMetadataChecksum)
       val metadataChecksum = new CRC32()
       metadataChecksum.update(metadata.array())
-      if (metadataChecksum.getValue != dataMetadataChecksum.getLong(0)) throw new RuntimeException("metadata corrupted")
+      if (metadataChecksum.getValue != dataMetadataChecksum.getLong(0)) throw new RuntimeException("Metadata corrupted")
       return Metadata(
         new String(dataFileName.array(), StandardCharsets.UTF_8),
         dataIv.array(),
@@ -144,7 +147,18 @@ object DEnc extends JFXApp {
       if (content.hasFiles) {
         val thread = new Thread(new Runnable {
           override def run() = {
-            f(content.files)
+            try {
+              f(content.files)
+            } catch {
+              case e: Exception => Platform.runLater {
+                new Alert(AlertType.Error) {
+                  initOwner(stage)
+                  title = "Warning"
+                  headerText = "Operation failed"
+                  contentText = e.getMessage
+                }.showAndWait()
+              }
+            }
           }
         })
         thread.setDaemon(true)
@@ -159,7 +173,7 @@ object DEnc extends JFXApp {
   val droppingRectangleEncryption = droppingRectangle(encrypt)
   val droppingRectangleDecryption = droppingRectangle(decrypt)
   val passwordField = new PasswordField {
-    promptText = "enter password"
+    promptText = "Enter password"
     prefWidth = 400
   }
   stage = new JFXApp.PrimaryStage {
@@ -189,7 +203,7 @@ object DEnc extends JFXApp {
   stage.sizeToScene()
   def encrypt(files: Seq[File]): Long = {
     val totalBytes = files(0).length()
-    println("encrypting " + files(0) + " (" + totalBytes + " bytes) ...")
+    println("Encrypting " + files(0) + " (" + totalBytes + " bytes) ...")
 
     val salt = randomBytes(16)
     val derivedKey = deriveKeyFrom(passwordField.text.value.toCharArray(), salt)
@@ -199,28 +213,46 @@ object DEnc extends JFXApp {
     val properties = new Properties()
     val transform = "AES/CBC/PKCS5Padding"
 
-    val encryptedFile = new File(files(0).getAbsolutePath + ".enc")
-    val fileOutputStream = new FileOutputStream(encryptedFile)
-    val cryptoOutputStream = new CryptoOutputStream(transform, properties, fileOutputStream, key, iv)
-    val fileInputStream = new FileInputStream(files(0))
-    val checkedInputStream = new CheckedInputStream(fileInputStream, new CRC32())
-    var totalBytesRead = 0
-    var currentBytesRead = 0
-    val data = ArrayBuffer.fill(1024)(0.toByte).toArray
-    while (currentBytesRead > -1) {
-      currentBytesRead = checkedInputStream.read(data, 0, 1024)
-      if (currentBytesRead > -1) {
-        totalBytesRead += currentBytesRead
-        cryptoOutputStream.write(data, 0, currentBytesRead)
+    var encryptedFile: File = null
+    var fileOutputStream: FileOutputStream = null
+    var cryptoOutputStream: CryptoOutputStream = null
+    var fileInputStream: FileInputStream = null
+    var checkedInputStream: CheckedInputStream = null
+    try {
+      encryptedFile = new File(files(0).getAbsolutePath + ".enc")
+      fileOutputStream = new FileOutputStream(encryptedFile)
+      cryptoOutputStream = new CryptoOutputStream(transform, properties, fileOutputStream, key, iv)
+      fileInputStream = new FileInputStream(files(0))
+      checkedInputStream = new CheckedInputStream(fileInputStream, new CRC32())
+      var totalBytesRead = 0
+      var currentBytesRead = 0
+      val data = ArrayBuffer.fill(1024)(0.toByte).toArray
+      while (currentBytesRead > -1) {
+        currentBytesRead = checkedInputStream.read(data, 0, 1024)
+        if (currentBytesRead > -1) {
+          totalBytesRead += currentBytesRead
+          cryptoOutputStream.write(data, 0, currentBytesRead)
+        }
+        setProgress(totalBytes, totalBytesRead)
       }
-      setProgress(totalBytes, totalBytesRead)
+    } catch {
+      case e: Exception => throw e
+    } finally {
+      if (cryptoOutputStream != null) {
+        cryptoOutputStream.flush()
+        cryptoOutputStream.close()
+      }
+      if (fileOutputStream != null) {
+        fileOutputStream.flush()
+        fileOutputStream.close()
+      }
+      if (fileInputStream != null) {
+        fileInputStream.close()
+      }
+      if (checkedInputStream != null) {
+        checkedInputStream.close()
+      }
     }
-    cryptoOutputStream.flush()
-    cryptoOutputStream.close()
-    fileOutputStream.flush()
-    fileOutputStream.close()
-    fileInputStream.close()
-    checkedInputStream.close()
     val meta = Metadata(
       files(0).getName,
       plainIv,
@@ -233,11 +265,11 @@ object DEnc extends JFXApp {
     println("IV:\t" + meta.iv.mkString(" "))
     println("Salt:\t" + meta.salt.mkString(" "))
     println("CRC32:\t" + meta.checksum)
-    println("wrote additional " + meta.writeTo(encryptedFile) + " bytes of metadata")
+    println("Metadata size:\t" + meta.writeTo(encryptedFile) + " bytes")
     return meta.checksum
   }
   def decrypt(files: Seq[File]): Long = {
-    println("decrypting " + files(0) + " (" + files(0).length() + " bytes) ...")
+    println("Decrypting " + files(0) + " (" + files(0).length() + " bytes) ...")
 
     val metadata = Metadata(files(0))
     val totalBytes = metadata.encryptedSize
@@ -255,30 +287,50 @@ object DEnc extends JFXApp {
     val properties = new Properties()
     val transform = "AES/CBC/PKCS5Padding"
 
-    val fileInputStream = new FileInputStream(files(0))
-    val cutoffInputStream = new CutoffInputStream(fileInputStream, metadata.encryptedSize)
-    val cryptoInputStream = new CryptoInputStream(transform, properties, cutoffInputStream, key, iv)
-    val fileOutputStream = new FileOutputStream(new File(files(0).getAbsolutePath + ".dec"))
-    val checkedOutputStream = new CheckedOutputStream(fileOutputStream, new CRC32())
-    val data = ByteBuffer.allocate(1024).array()
-    var totalBytesRead = 0
-    var currentBytesRead = 0
-    while (currentBytesRead > -1) {
-      currentBytesRead = cryptoInputStream.read(data)
-      if (currentBytesRead > -1) {
-        totalBytesRead += currentBytesRead
-        checkedOutputStream.write(data, 0, currentBytesRead)
+    var fileInputStream: FileInputStream = null
+    var cutoffInputStream: CutoffInputStream = null
+    var cryptoInputStream: CryptoInputStream = null
+    var fileOutputStream: FileOutputStream = null
+    var checkedOutputStream: CheckedOutputStream = null
+    try {
+      fileInputStream = new FileInputStream(files(0))
+      cutoffInputStream = new CutoffInputStream(fileInputStream, metadata.encryptedSize)
+      cryptoInputStream = new CryptoInputStream(transform, properties, cutoffInputStream, key, iv)
+      fileOutputStream = new FileOutputStream(new File(metadata.filename + ".dec"))
+      checkedOutputStream = new CheckedOutputStream(fileOutputStream, new CRC32())
+      val data = ByteBuffer.allocate(1024).array()
+      var totalBytesRead = 0
+      var currentBytesRead = 0
+      while (currentBytesRead > -1) {
+        currentBytesRead = cryptoInputStream.read(data)
+        if (currentBytesRead > -1) {
+          totalBytesRead += currentBytesRead
+          checkedOutputStream.write(data, 0, currentBytesRead)
+        }
+        setProgress(totalBytes, totalBytesRead)
       }
-      setProgress(totalBytes, totalBytesRead)
+    } catch {
+      case e: Exception => throw e
+    } finally {
+      if (fileOutputStream != null) {
+        fileOutputStream.flush()
+        fileOutputStream.close()
+      }
+      if (checkedOutputStream != null) {
+        checkedOutputStream.flush()
+        checkedOutputStream.close()
+      }
+      if (cryptoInputStream != null) {
+        cryptoInputStream.close()
+      }
+      if (cutoffInputStream != null) {
+        cutoffInputStream.close()
+      }
+      if (fileInputStream != null) {
+        fileInputStream.close()
+      }
     }
-    fileOutputStream.flush()
-    fileOutputStream.close()
-    checkedOutputStream.flush()
-    checkedOutputStream.close()
-    cryptoInputStream.close()
-    cutoffInputStream.close()
-    fileInputStream.close()
-    if(checkedOutputStream.getChecksum.getValue != metadata.checksum) throw new RuntimeException("file corrupted")
+    if (checkedOutputStream.getChecksum.getValue != metadata.checksum) throw new RuntimeException("File corrupted")
     return checkedOutputStream.getChecksum.getValue
   }
   private def randomBytes(amount: Int): Array[Byte] = {
