@@ -1,54 +1,101 @@
 package mldl
 
-import scalafx.application._
-import scalafx.Includes._
-import scalafx.scene._
-import scalafx.scene.shape.Rectangle
-import scalafx.scene.input.DragEvent
-import scalafx.scene.paint._
-import scalafx.animation.FadeTransition
-import scalafx.animation.Interpolator
-import scalafx.util.Duration
-import scalafx.animation.FillTransition
-import scalafx.scene.input.TransferMode
-import scalafx.scene.layout.StackPane
-import scalafx.scene.text.Text
-import scalafx.scene.control.ProgressBar
-import scalafx.scene.layout.BorderPane
 import java.io.File
-import java.util.Properties
-import java.io.FileOutputStream
-import java.io.ByteArrayOutputStream
 import java.io.FileInputStream
-import javax.crypto.spec.IvParameterSpec
-import java.nio.charset.Charset
-import javax.crypto.spec.SecretKeySpec
-import org.apache.commons.crypto.stream.CryptoOutputStream
-import java.nio.charset.StandardCharsets
-import scala.collection.mutable.ArrayBuffer
-import org.apache.commons.crypto.stream.CryptoInputStream
-import scalafx.scene.control.PasswordField
-import org.apache.commons.crypto.random.CryptoRandomFactory
-import javax.crypto.spec.PBEKeySpec
-import javax.crypto.SecretKeyFactory
-import java.io.PrintWriter
-import java.io.RandomAccessFile
-import java.nio.channels.FileChannel
-import java.nio.file.Paths
-import java.nio.file.StandardOpenOption
-import java.nio.ByteBuffer
+import java.io.FileOutputStream
 import java.io.FilterInputStream
 import java.io.InputStream
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.charset.StandardCharsets
+import java.nio.file.Paths
+import java.nio.file.StandardOpenOption
+import java.util.Properties
+
+import scala.collection.mutable.ArrayBuffer
+
+import org.apache.commons.crypto.random.CryptoRandomFactory
+import org.apache.commons.crypto.stream.CryptoInputStream
+import org.apache.commons.crypto.stream.CryptoOutputStream
+
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
+import scalafx.Includes.eventClosureWrapperWithParam
+import scalafx.Includes.jfxDragEvent2sfx
+import scalafx.application.JFXApp
+import scalafx.scene.Scene
+import scalafx.scene.control.PasswordField
+import scalafx.scene.control.ProgressBar
+import scalafx.scene.input.DragEvent
+import scalafx.scene.input.TransferMode
+import scalafx.scene.layout.BorderPane
+import scalafx.scene.layout.StackPane
+import scalafx.scene.paint.Color
+import scalafx.scene.shape.Rectangle
+import scalafx.scene.text.Text
 
 object DEnc extends JFXApp {
   private case class DerivedKey(key: Array[Byte], salt: Array[Byte])
-  private case class MetaData(
-    filename: String,
-    iv: Array[Byte],
-    salt: Array[Byte],
-    filesize: Long, // FIXME this could be a security issue
-    encryptedSize: Long,
-    metadataSize: Int)
+  private case class MetaData private (
+      filename: String,
+      iv: Array[Byte],
+      salt: Array[Byte],
+      encryptedSize: Long,
+      metadataSize: Int,
+      metadataVersion: Int) {
+    def writeTo(file: File): Long = {
+      val encryptedSize = file.length()
+      val fileOutputStream = new FileOutputStream(file, true)
+      val filnameBytes = filename.getBytes(StandardCharsets.UTF_8)
+      fileOutputStream.write(ByteBuffer.allocate(4).putInt(filnameBytes.length).array())
+      fileOutputStream.write(filnameBytes)
+      fileOutputStream.write(ByteBuffer.allocate(4).putInt(iv.length).array())
+      fileOutputStream.write(iv)
+      fileOutputStream.write(ByteBuffer.allocate(4).putInt(salt.length).array())
+      fileOutputStream.write(salt)
+      fileOutputStream.write(ByteBuffer.allocate(4).putInt(metadataVersion).array())
+      fileOutputStream.write(ByteBuffer.allocate(8).putLong(encryptedSize).array())
+      val metadataSize = filnameBytes.length + iv.length + salt.length + 7 * 4
+      fileOutputStream.write(ByteBuffer.allocate(4).putInt(metadataSize).array())
+      fileOutputStream.flush()
+      fileOutputStream.close()
+      return metadataSize
+    }
+  }
+  private object MetaData {
+    def apply(file: File): MetaData = {
+      val fileChannel = FileChannel.open(Paths.get(file.getPath), StandardOpenOption.READ)
+      fileChannel.position(fileChannel.size() - 4)
+      val dataMetaDataLength = ByteBuffer.allocate(4)
+      fileChannel.read(dataMetaDataLength)
+      fileChannel.position(fileChannel.size() - dataMetaDataLength.getInt(0))
+      val dataFileNameLength = ByteBuffer.allocate(4)
+      fileChannel.read(dataFileNameLength)
+      val dataFileName = ByteBuffer.allocate(dataFileNameLength.getInt(0))
+      fileChannel.read(dataFileName)
+      val dataIvLength = ByteBuffer.allocate(4)
+      fileChannel.read(dataIvLength)
+      val dataIv = ByteBuffer.allocate(dataIvLength.getInt(0))
+      fileChannel.read(dataIv)
+      val dataSaltLength = ByteBuffer.allocate(4)
+      fileChannel.read(dataSaltLength)
+      val dataSalt = ByteBuffer.allocate(dataSaltLength.getInt(0))
+      fileChannel.read(dataSalt)
+      val dataMetadataVersion = ByteBuffer.allocate(4)
+      fileChannel.read(dataMetadataVersion)
+      val dataEncryptedFilesize = ByteBuffer.allocate(8)
+      fileChannel.read(dataEncryptedFilesize)
+      return MetaData(
+        new String(dataFileName.array(), StandardCharsets.UTF_8),
+        dataIv.array(),
+        dataSalt.array(),
+        dataEncryptedFilesize.getLong(0),
+        dataMetaDataLength.getInt(0),
+        dataMetadataVersion.getInt(0))
+    }
+  }
   val progressBar = new ProgressBar {
     prefWidth = 400
     progress = 0.0d
@@ -146,20 +193,19 @@ object DEnc extends JFXApp {
     fileOutputStream.flush()
     fileOutputStream.close()
     fileInputStream.close()
-    val meta = MetaData(files(0).getName, plainIv, salt, totalBytes, -1, -1)
+    val meta = MetaData(files(0).getName, plainIv, salt, totalBytes, -1, 1) // size is calculated upon write
     println("IV:\t" + meta.iv.mkString(""))
     println("Salt:\t" + meta.salt.mkString(""))
-    val metaBytes = writeMetaData(meta, encryptedFile)
-    println("wrote additional " + metaBytes + " bytes of metadata")
+    println("wrote additional " + meta.writeTo(encryptedFile) + " bytes of metadata")
   }
   def decrypt(files: Seq[File]) = {
-    val totalBytes = files(0).length()
-    println("decrypting " + files(0) + " (" + totalBytes + " bytes) ...")
+    println("decrypting " + files(0) + " (" + files(0).length() + " bytes) ...")
 
-    val metadata = readMetadata(files(0))
+    val metadata = MetaData(files(0))
+    val totalBytes = metadata.encryptedSize
     println("Filename:\t" + metadata.filename)
-    println("File size:\t" + metadata.filesize + " bytes")
     println("Encrypted size:\t" + metadata.encryptedSize + " bytes")
+    println("Metadata version:\t" + metadata.metadataVersion)
     println("Metadata size:\t" + metadata.metadataSize + " bytes")
     println("IV:\t" + metadata.iv.mkString(""))
     println("Salt:\t" + metadata.salt.mkString(""))
@@ -190,54 +236,6 @@ object DEnc extends JFXApp {
     cryptoInputStream.close()
     fileInputStream.close()
   }
-  private def writeMetaData(metaData: MetaData, file: File): Long = {
-    val encryptedSize = file.length()
-    val fileOutputStream = new FileOutputStream(file, true)
-    val filnameBytes = metaData.filename.getBytes(StandardCharsets.UTF_8)
-    fileOutputStream.write(ByteBuffer.allocate(4).putInt(filnameBytes.length).array())
-    fileOutputStream.write(filnameBytes)
-    fileOutputStream.write(ByteBuffer.allocate(4).putInt(metaData.iv.length).array())
-    fileOutputStream.write(metaData.iv)
-    fileOutputStream.write(ByteBuffer.allocate(4).putInt(metaData.salt.length).array())
-    fileOutputStream.write(metaData.salt)
-    fileOutputStream.write(ByteBuffer.allocate(8).putLong(metaData.filesize).array())
-    fileOutputStream.write(ByteBuffer.allocate(8).putLong(encryptedSize).array())
-    val metadataSize = filnameBytes.length + metaData.iv.length + metaData.salt.length + 8 * 4
-    fileOutputStream.write(ByteBuffer.allocate(4).putInt(metadataSize).array())
-    fileOutputStream.flush()
-    fileOutputStream.close()
-    return metadataSize
-  }
-  private def readMetadata(file: File): MetaData = {
-    val fileChannel = FileChannel.open(Paths.get(file.getPath), StandardOpenOption.READ)
-    fileChannel.position(fileChannel.size() - 4)
-    val dataMetaDataLength = ByteBuffer.allocate(4)
-    fileChannel.read(dataMetaDataLength)
-    fileChannel.position(fileChannel.size() - dataMetaDataLength.getInt(0))
-    val dataFileNameLength = ByteBuffer.allocate(4)
-    fileChannel.read(dataFileNameLength)
-    val dataFileName = ByteBuffer.allocate(dataFileNameLength.getInt(0))
-    fileChannel.read(dataFileName)
-    val dataIvLength = ByteBuffer.allocate(4)
-    fileChannel.read(dataIvLength)
-    val dataIv = ByteBuffer.allocate(dataIvLength.getInt(0))
-    fileChannel.read(dataIv)
-    val dataSaltLength = ByteBuffer.allocate(4)
-    fileChannel.read(dataSaltLength)
-    val dataSalt = ByteBuffer.allocate(dataSaltLength.getInt(0))
-    fileChannel.read(dataSalt)
-    val dataFilesize = ByteBuffer.allocate(8)
-    fileChannel.read(dataFilesize)
-    val dataEncryptedFilesize = ByteBuffer.allocate(8)
-    fileChannel.read(dataEncryptedFilesize)
-    return MetaData(
-      new String(dataFileName.array(), StandardCharsets.UTF_8),
-      dataIv.array(),
-      dataSalt.array(),
-      dataFilesize.getLong(0),
-      dataEncryptedFilesize.getLong(0),
-      dataMetaDataLength.getInt(0))
-  }
   private def randomBytes(amount: Int): Array[Byte] = {
     val data = ArrayBuffer.fill(amount)(0.toByte).toArray
     CryptoRandomFactory.getCryptoRandom().nextBytes(data)
@@ -262,15 +260,9 @@ class CutoffInputStream(is: InputStream, maxBytes: Long) extends FilterInputStre
   }
   override def read(array: Array[Byte], offset: Int, length: Int): Int = {
     if (totalBytesRead < maxBytes) {
-      if (totalBytesRead + length <= maxBytes) { // all fits in total maximum
-        val currentBytesRead = in.read(array, offset, length) // TODO not tested
-        totalBytesRead += currentBytesRead
-        return currentBytesRead
-      } else { // only a portion will be written
-        val currentBytesRead = in.read(array, offset, (maxBytes - totalBytesRead).toInt)
-        totalBytesRead += currentBytesRead
-        return currentBytesRead
-      }
+      val currentBytesRead = in.read(array, offset, (maxBytes - totalBytesRead).toInt)
+      totalBytesRead += currentBytesRead
+      return currentBytesRead
     } else { // reached the limit, so cut off
       return -1
     }
