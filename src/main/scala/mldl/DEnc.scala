@@ -22,8 +22,7 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
-import scalafx.Includes.eventClosureWrapperWithParam
-import scalafx.Includes.jfxDragEvent2sfx
+import scalafx.Includes._
 import scalafx.application.JFXApp
 import scalafx.scene.Scene
 import scalafx.scene.control.PasswordField
@@ -35,42 +34,58 @@ import scalafx.scene.layout.StackPane
 import scalafx.scene.paint.Color
 import scalafx.scene.shape.Rectangle
 import scalafx.scene.text.Text
+import java.util.zip.CheckedInputStream
+import java.util.zip.CRC32
+import java.util.zip.CheckedOutputStream
 
 object DEnc extends JFXApp {
-  private case class DerivedKey(key: Array[Byte], salt: Array[Byte])
-  private case class MetaData private (
+  private case class DerivedData(key: Array[Byte], salt: Array[Byte])
+  private case class Metadata private (
       filename: String,
       iv: Array[Byte],
       salt: Array[Byte],
       encryptedSize: Long,
+      checksum: Long,
       metadataSize: Int,
-      metadataVersion: Int) {
+      metadataVersion: Int,
+      metadataChecksum: Long) {
     def writeTo(file: File): Long = {
       val encryptedSize = file.length()
       val fileOutputStream = new FileOutputStream(file, true)
+      val checkedOutputStream = new CheckedOutputStream(fileOutputStream, new CRC32())
       val filnameBytes = filename.getBytes(StandardCharsets.UTF_8)
-      fileOutputStream.write(ByteBuffer.allocate(4).putInt(filnameBytes.length).array())
-      fileOutputStream.write(filnameBytes)
-      fileOutputStream.write(ByteBuffer.allocate(4).putInt(iv.length).array())
-      fileOutputStream.write(iv)
-      fileOutputStream.write(ByteBuffer.allocate(4).putInt(salt.length).array())
-      fileOutputStream.write(salt)
-      fileOutputStream.write(ByteBuffer.allocate(4).putInt(metadataVersion).array())
-      fileOutputStream.write(ByteBuffer.allocate(8).putLong(encryptedSize).array())
-      val metadataSize = filnameBytes.length + iv.length + salt.length + 7 * 4
-      fileOutputStream.write(ByteBuffer.allocate(4).putInt(metadataSize).array())
+      checkedOutputStream.write(ByteBuffer.allocate(4).putInt(Metadata.VERSION).array())
+      checkedOutputStream.write(ByteBuffer.allocate(4).putInt(filnameBytes.length).array())
+      checkedOutputStream.write(filnameBytes)
+      checkedOutputStream.write(ByteBuffer.allocate(4).putInt(iv.length).array())
+      checkedOutputStream.write(iv)
+      checkedOutputStream.write(ByteBuffer.allocate(4).putInt(salt.length).array())
+      checkedOutputStream.write(salt)
+      checkedOutputStream.write(ByteBuffer.allocate(8).putLong(encryptedSize).array())
+      checkedOutputStream.write(ByteBuffer.allocate(8).putLong(checksum).array())
+      val metadataSize = filnameBytes.length + iv.length + salt.length + 11 * 4
+      checkedOutputStream.write(ByteBuffer.allocate(4).putInt(metadataSize).array())
+      checkedOutputStream.flush()
+      checkedOutputStream.write(ByteBuffer.allocate(8).putLong(checkedOutputStream.getChecksum.getValue).array())
+      checkedOutputStream.flush()
+      checkedOutputStream.close()
       fileOutputStream.flush()
       fileOutputStream.close()
       return metadataSize
     }
   }
-  private object MetaData {
-    def apply(file: File): MetaData = {
+  private object Metadata {
+    val VERSION = 1
+    def apply(file: File): Metadata = {
       val fileChannel = FileChannel.open(Paths.get(file.getPath), StandardOpenOption.READ)
-      fileChannel.position(fileChannel.size() - 4)
+      fileChannel.position(fileChannel.size() - (4 + 8)) // metadata checksum comes last
       val dataMetaDataLength = ByteBuffer.allocate(4)
       fileChannel.read(dataMetaDataLength)
-      fileChannel.position(fileChannel.size() - dataMetaDataLength.getInt(0))
+      val metadataPosition = fileChannel.size() - dataMetaDataLength.getInt(0)
+      fileChannel.position(metadataPosition)
+      val dataMetadataVersion = ByteBuffer.allocate(4)
+      fileChannel.read(dataMetadataVersion)
+      if (dataMetadataVersion.getInt(0) != VERSION) throw new RuntimeException("invalid metadata version detected")
       val dataFileNameLength = ByteBuffer.allocate(4)
       fileChannel.read(dataFileNameLength)
       val dataFileName = ByteBuffer.allocate(dataFileNameLength.getInt(0))
@@ -83,24 +98,35 @@ object DEnc extends JFXApp {
       fileChannel.read(dataSaltLength)
       val dataSalt = ByteBuffer.allocate(dataSaltLength.getInt(0))
       fileChannel.read(dataSalt)
-      val dataMetadataVersion = ByteBuffer.allocate(4)
-      fileChannel.read(dataMetadataVersion)
       val dataEncryptedFilesize = ByteBuffer.allocate(8)
       fileChannel.read(dataEncryptedFilesize)
-      return MetaData(
+      val dataChecksum = ByteBuffer.allocate(8)
+      fileChannel.read(dataChecksum)
+      // check metadata for corruption
+      val metadata = ByteBuffer.allocate(dataMetaDataLength.getInt(0) - 8) // exclude the checksum itself
+      fileChannel.position(metadataPosition)
+      fileChannel.read(metadata)
+      val dataMetadataChecksum = ByteBuffer.allocate(8)
+      fileChannel.read(dataMetadataChecksum)
+      val metadataChecksum = new CRC32()
+      metadataChecksum.update(metadata.array())
+      if (metadataChecksum.getValue != dataMetadataChecksum.getLong(0)) throw new RuntimeException("metadata corrupted")
+      return Metadata(
         new String(dataFileName.array(), StandardCharsets.UTF_8),
         dataIv.array(),
         dataSalt.array(),
         dataEncryptedFilesize.getLong(0),
+        dataChecksum.getLong(0),
         dataMetaDataLength.getInt(0),
-        dataMetadataVersion.getInt(0))
+        dataMetadataVersion.getInt(0),
+        dataMetadataChecksum.getLong(0))
     }
   }
   val progressBar = new ProgressBar {
     prefWidth = 400
     progress = 0.0d
   }
-  def droppingRectangle(f: Seq[File] => Unit) = new Rectangle {
+  def droppingRectangle[R](f: Seq[File] => R) = new Rectangle {
     width = 200
     height = 200
     fill = Color.Grey
@@ -161,7 +187,7 @@ object DEnc extends JFXApp {
     }
   }
   stage.sizeToScene()
-  def encrypt(files: Seq[File]) = {
+  def encrypt(files: Seq[File]): Long = {
     val totalBytes = files(0).length()
     println("encrypting " + files(0) + " (" + totalBytes + " bytes) ...")
 
@@ -177,11 +203,12 @@ object DEnc extends JFXApp {
     val fileOutputStream = new FileOutputStream(encryptedFile)
     val cryptoOutputStream = new CryptoOutputStream(transform, properties, fileOutputStream, key, iv)
     val fileInputStream = new FileInputStream(files(0))
+    val checkedInputStream = new CheckedInputStream(fileInputStream, new CRC32())
     var totalBytesRead = 0
     var currentBytesRead = 0
     val data = ArrayBuffer.fill(1024)(0.toByte).toArray
     while (currentBytesRead > -1) {
-      currentBytesRead = fileInputStream.read(data, 0, 1024)
+      currentBytesRead = checkedInputStream.read(data, 0, 1024)
       if (currentBytesRead > -1) {
         totalBytesRead += currentBytesRead
         cryptoOutputStream.write(data, 0, currentBytesRead)
@@ -193,22 +220,34 @@ object DEnc extends JFXApp {
     fileOutputStream.flush()
     fileOutputStream.close()
     fileInputStream.close()
-    val meta = MetaData(files(0).getName, plainIv, salt, totalBytes, -1, 1) // size is calculated upon write
-    println("IV:\t" + meta.iv.mkString(""))
-    println("Salt:\t" + meta.salt.mkString(""))
+    checkedInputStream.close()
+    val meta = Metadata(
+      files(0).getName,
+      plainIv,
+      salt,
+      totalBytes,
+      checkedInputStream.getChecksum.getValue,
+      -1, // size is calculated and overwritten upon write
+      -1, // metadata version is overwritten upon write
+      -1) // checksum is calculated and overwritten upon write
+    println("IV:\t" + meta.iv.mkString(" "))
+    println("Salt:\t" + meta.salt.mkString(" "))
+    println("CRC32:\t" + meta.checksum)
     println("wrote additional " + meta.writeTo(encryptedFile) + " bytes of metadata")
+    return meta.checksum
   }
-  def decrypt(files: Seq[File]) = {
+  def decrypt(files: Seq[File]): Long = {
     println("decrypting " + files(0) + " (" + files(0).length() + " bytes) ...")
 
-    val metadata = MetaData(files(0))
+    val metadata = Metadata(files(0))
     val totalBytes = metadata.encryptedSize
     println("Filename:\t" + metadata.filename)
     println("Encrypted size:\t" + metadata.encryptedSize + " bytes")
+    println("IV:\t" + metadata.iv.mkString(" "))
+    println("Salt:\t" + metadata.salt.mkString(" "))
+    println("CRC32:\t" + metadata.checksum)
     println("Metadata version:\t" + metadata.metadataVersion)
     println("Metadata size:\t" + metadata.metadataSize + " bytes")
-    println("IV:\t" + metadata.iv.mkString(""))
-    println("Salt:\t" + metadata.salt.mkString(""))
 
     val derivedKey = deriveKeyFrom(passwordField.text.value.toCharArray(), metadata.salt)
     val key = new SecretKeySpec(derivedKey.key, "AES");
@@ -220,6 +259,7 @@ object DEnc extends JFXApp {
     val cutoffInputStream = new CutoffInputStream(fileInputStream, metadata.encryptedSize)
     val cryptoInputStream = new CryptoInputStream(transform, properties, cutoffInputStream, key, iv)
     val fileOutputStream = new FileOutputStream(new File(files(0).getAbsolutePath + ".dec"))
+    val checkedOutputStream = new CheckedOutputStream(fileOutputStream, new CRC32())
     val data = ByteBuffer.allocate(1024).array()
     var totalBytesRead = 0
     var currentBytesRead = 0
@@ -227,24 +267,29 @@ object DEnc extends JFXApp {
       currentBytesRead = cryptoInputStream.read(data)
       if (currentBytesRead > -1) {
         totalBytesRead += currentBytesRead
-        fileOutputStream.write(data, 0, currentBytesRead)
+        checkedOutputStream.write(data, 0, currentBytesRead)
       }
       setProgress(totalBytes, totalBytesRead)
     }
     fileOutputStream.flush()
     fileOutputStream.close()
+    checkedOutputStream.flush()
+    checkedOutputStream.close()
     cryptoInputStream.close()
+    cutoffInputStream.close()
     fileInputStream.close()
+    if(checkedOutputStream.getChecksum.getValue != metadata.checksum) throw new RuntimeException("file corrupted")
+    return checkedOutputStream.getChecksum.getValue
   }
   private def randomBytes(amount: Int): Array[Byte] = {
     val data = ArrayBuffer.fill(amount)(0.toByte).toArray
     CryptoRandomFactory.getCryptoRandom().nextBytes(data)
     return data
   }
-  private def deriveKeyFrom(password: Array[Char], salt: Array[Byte]): DerivedKey = {
+  private def deriveKeyFrom(password: Array[Char], salt: Array[Byte]): DerivedData = {
     val spec = new PBEKeySpec(password, salt, 65536, 128); // AES-128
     val secretKeyFactory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA1")
-    return DerivedKey(secretKeyFactory.generateSecret(spec).getEncoded(), salt)
+    return DerivedData(secretKeyFactory.generateSecret(spec).getEncoded(), salt)
   }
   private def setProgress(total: Long, current: Long) = progressBar.progress = 1.0d / total.toDouble * current.toDouble
 }
