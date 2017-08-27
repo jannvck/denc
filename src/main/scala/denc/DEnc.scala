@@ -357,9 +357,15 @@ class CutoffInputStream(is: InputStream, maxBytes: Long) extends FilterInputStre
   }
   override def read(array: Array[Byte], offset: Int, length: Int): Int = {
     if (totalBytesRead < maxBytes) {
-      val currentBytesRead = in.read(array, offset, (maxBytes - totalBytesRead).toInt)
-      totalBytesRead += currentBytesRead
-      return currentBytesRead
+      if (totalBytesRead + length <= maxBytes) { // all fits in total maximum
+        val currentBytesRead = in.read(array, offset, length)
+        totalBytesRead += currentBytesRead
+        return currentBytesRead
+      } else { // only a portion will be written
+        val currentBytesRead = in.read(array, offset, (maxBytes - totalBytesRead).toInt)
+        totalBytesRead += currentBytesRead
+        return currentBytesRead
+      }
     } else { // reached the limit, so cut off
       return -1
     }
