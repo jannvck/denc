@@ -296,7 +296,7 @@ object DEnc extends JFXApp {
       fileInputStream = new FileInputStream(files(0))
       cutoffInputStream = new CutoffInputStream(fileInputStream, metadata.encryptedSize)
       cryptoInputStream = new CryptoInputStream(transform, properties, cutoffInputStream, key, iv)
-      fileOutputStream = new FileOutputStream(new File(metadata.filename + ".dec"))
+      fileOutputStream = new FileOutputStream(new File(files(0).getAbsolutePath.replace(files(0).getName, "") + metadata.filename + ".dec"))
       checkedOutputStream = new CheckedOutputStream(fileOutputStream, new CRC32())
       val data = ByteBuffer.allocate(1024).array()
       var totalBytesRead = 0
