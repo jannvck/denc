@@ -176,7 +176,6 @@ object DEnc extends JFXApp {
       de.consume()
     }
     onDragDropped = (de: DragEvent) => {
-      println("drag event: " + de)
       val content = de.dragboard.content
       if (content.hasFiles) {
         try {
