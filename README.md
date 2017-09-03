@@ -18,3 +18,6 @@ This will produce an executable *denc-assembly-0.3.jar* file in the *target/scal
 ## Usage instructions
 To encrypt or decrypt files just drag them into the corresponding fields in the graphical user interface.
 The interface also contains a field at the top to insert a password.
+Encrypting a file will result in an encrypted file with same name and *.enc* extension created in the same directory as the source file.
+The source filename will be reused upon decryption which leads to a file with the source filename and *.dec* extension in the same directory.
+Encrypting folders or multiple files at once is currently not supported.
