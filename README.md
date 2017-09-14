@@ -1,5 +1,5 @@
 # denc
-Small multiplatform tool with a GUI to encrypt/decrypt files. Written in Scala and implemented as a JavaFX application using [ScalaFX](http://www.scalafx.org/) and [Apache Commons Crypto](https://commons.apache.org/proper/commons-crypto/).
+Small portable multiplatform tool with a GUI to encrypt/decrypt files. Written in Scala and implemented as a JavaFX application using [ScalaFX](http://www.scalafx.org/) and [Apache Commons Crypto](https://commons.apache.org/proper/commons-crypto/).
 
 ![Screenshot](https://raw.githubusercontent.com/jannvck/denc/master/release/denc-0.3-screenshot-0.png)
 ![Screenshot](https://raw.githubusercontent.com/jannvck/denc/master/release/denc-0.3-screenshot-1.png)
